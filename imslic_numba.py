@@ -1,74 +1,84 @@
 import numpy as np
 import cv2
-from numba import njit, prange
+from numba import njit, prange, stencil
 import time
-
-sigma = 6.0 / 29.0
-sigma_2 = np.power(sigma, 2.0)
-sigma_3 = np.power(sigma, 3.0)
-M = np.array([[0.4124564, 0.3575761, 0.1804375], 
-              [0.2126729, 0.7151522, 0.0721750], 
-              [0.0193339, 0.1191920, 0.9503041]])
+from rgb2lab import rgb_to_lab
+from area import compute_area, compute_cumulative_area
+from seeds import compute_seeds
 
 @njit(cache=True)
-def xyz_to_lab(f_xyz):
-    lab = np.zeros((3))
-    lab[0] = compute_l(f_xyz)
-    lab[1] = compute_l(f_xyz)
-    lab[2] = compute_l(f_xyz)
-    return lab
+def compute_lambda_factor(seed_position, region_size, area, xi, height, width):
+    x_min = int(max(0, seed_position[1] - region_size))
+    x_max = int(min(width - 1, seed_position[1] + region_size))
+    y_min = int(max(0, seed_position[0] - region_size)) 
+    y_max = int(min(height - 1, seed_position[0] + region_size))
+    sub_region_area = area[y_min : y_max + 1, x_min : x_max + 1].sum()
+    return np.sqrt(xi / sub_region_area)
 
-@njit(cache=True)
-def f(t):
-    if t > sigma_3:
-        return np.power(t, 1.0 / 3.0)
-    else:
-        return t / (3.0 * sigma_2) + (4.0 / 29.0)
-
-@njit(cache=True)
-def f_vector(xyz):
-    f_xyz = np.zeros((3))
-    f_xyz[0] = f(xyz[0])
-    f_xyz[1] = f(xyz[1])
-    f_xyz[2] = f(xyz[2])
-    return f_xyz
-
-@njit(cache=True)
-def rgb_to_xyz(rgb):
-    return M @ rgb
-
-@njit(cache=True)
-def compute_l(f_xyz):
-    return 116.0 * f_xyz[1] - 16.0
-
-@njit(cache=True)
-def compute_a(f_xyz):
-    return 500.0 * (f_xyz[0] / 0.950489 - f_xyz[1])
-
-@njit(cache=True)
-def compute_b(f_xyz):
-    return 200.0 * (f_xyz[1] - f_xyz[2] / 1.08884)
-
-@njit(cache=True)
-def rgb_to_lab(image):
-    scaled_image = image / 255.0
-    lab_image = np.zeros_like(scaled_image)
-    for y in range(scaled_image.shape[0]):
-        for x in range(scaled_image.shape[1]):
-            xyz = M @ scaled_image[y, x, :]
-            lab_image[y, x, 0] = (116.0 * f(xyz[1]) - 16.0) * 2.55
-            lab_image[y, x, 1] = 500.0 * (f(xyz[0]) / 0.950489 - f(xyz[1])) + 128.0
-            lab_image[y, x, 2] = 200.0 * (f(xyz[1]) - f(xyz[2]) / 1.08884) + 128.0
-    return lab_image
+@njit(parallel=True)
+def compute_regions_distances(K, seeds_positions, region_size, area, xi, height, width, lab_image):
+    memory_requirement = 0
+    for k in prange(K):
+        lambda_factor = compute_lambda_factor(seeds_positions[:, k], region_size, area, xi, height, width)
+        offset = region_size * lambda_factor
+        x_min = int(max(0, seeds_positions[1, k] - offset))
+        x_max = int(min(width - 1, seeds_positions[1, k] + offset))
+        y_min = int(max(0, seeds_positions[0, k] - offset))
+        y_max = int(min(height - 1, seeds_positions[0, k] + offset))
+        delta_x = (x_max - x_min) + 1
+        delta_y = (y_max - y_min) + 1
+        memory_requirement += (delta_x * delta_y) ** 2.0
+        region_graph = np.zeros((delta_x * delta_y, delta_x * delta_y))
+        for y in range(delta_y - 1):
+            for x in range(delta_x):
+                index = y * delta_x + x
+                east_neighbor_index = index + 1
+                south_neighbor_index = index + delta_x
+                east_distance = np.sqrt(
+                    1 + np.sum(np.power(lab_image[y_min + y, x_min + x, :] - lab_image[y_min + y, x_min + x + 1, :], 2.0))
+                )
+                south_distance = np.sqrt(
+                    1 + np.sum(np.power(lab_image[y_min + y, x_min + x, :] - lab_image[y_min + y + 1, x_min + x, :], 2.0))
+                )
+                region_graph[index, east_neighbor_index] = east_distance
+                region_graph[east_neighbor_index, index] = east_distance
+                region_graph[index, south_neighbor_index] = south_distance
+                region_graph[south_neighbor_index, index] = south_distance
 
 def main():
     source_image = cv2.imread("./1.jpg")
     source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
-    lab_image = rgb_to_lab(source_image.astype("float32"))
-    #for channel in range(3):
-    #    print(lab_image[:, :, channel].min(), lab_image[:, :, channel].max())
 
-#forward_vector = np.vectorize(forward)
+    lab_image = rgb_to_lab(source_image.astype("float32"))
+
+    padded_shape = source_image.shape + np.array([2, 2, 0])
+    padded_image = np.zeros((padded_shape))
+    padded_image[1:-1, 1:-1, :] = lab_image
+    padded_image[1:-1, 0, :]    = padded_image[1:-1, 1, :]
+    padded_image[1:-1, -1, :]   = padded_image[1:-1, -2, :]
+    padded_image[0, 1:-1, :]    = padded_image[1, 1:-1, :]
+    padded_image[-1, 1:-1, :]   = padded_image[-2, 1:-1, :]
+    padded_image[0, 0, :]       = padded_image[1, 1, :]
+    padded_image[0, -1, :]      = padded_image[1, -2, :]
+    padded_image[-1, 0, :]      = padded_image[-2, 1, :]
+    padded_image[-1, -1, :]     = padded_image[-2, -2, :]
+
+    area = compute_area(padded_image)
+    cumulative_area = compute_cumulative_area(area)
+    area = area.reshape((lab_image.shape[0], lab_image.shape[1]))
+    region_size = 10.0
+    K = int((source_image.shape[0] * source_image.shape[1]) / (region_size ** 2.0))
+    xi = cumulative_area[-1] * 4.0 / K
+    seeds_positions, seeds_values = compute_seeds(lab_image, cumulative_area, K)
+    max_iterations = 10
+
+    for iteration in range(max_iterations):
+        labels = np.ones_like(area) * -1.0
+        global_distances = np.ones_like(area) * 1E12
+        compute_regions_distances(K, seeds_positions, region_size, area, xi, lab_image.shape[0], lab_image.shape[1], lab_image)
+        break
+
+
 
 if __name__ == "__main__":
     start_time = time.time()
