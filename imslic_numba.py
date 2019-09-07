@@ -7,6 +7,18 @@ from area import compute_area, compute_cumulative_area
 from seeds import compute_seeds
 
 @njit(cache=True)
+def shortest_path(region_graph):
+    for h in range(region_graph.shape[0]):
+        for k in range(region_graph.shape[0]):
+            if h != k:
+                for s in range(region_graph.shape[0]):
+                    if h != s:
+                        if region_graph[h, k] + region_graph[k, s] < region_graph[h, s]:
+                            region_graph[h, s] = region_graph[h, k] + region_graph[k, s]
+                            region_graph[s, h] = region_graph[h, k] + region_graph[k, s]
+    return region_graph
+
+@njit(cache=True)
 def compute_lambda_factor(seed_position, region_size, area, xi, height, width):
     x_min = int(max(0, seed_position[1] - region_size))
     x_max = int(min(width - 1, seed_position[1] + region_size))
@@ -44,6 +56,8 @@ def compute_regions_distances(K, seeds_positions, region_size, area, xi, height,
                 region_graph[east_neighbor_index, index] = east_distance
                 region_graph[index, south_neighbor_index] = south_distance
                 region_graph[south_neighbor_index, index] = south_distance
+        shortest_region_path = shortest_path(region_graph)
+    print("Fine iterazione")
 
 def main():
     source_image = cv2.imread("./1.jpg")
