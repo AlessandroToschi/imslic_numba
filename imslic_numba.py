@@ -1,10 +1,12 @@
 import numpy as np
 import cv2
 from numba import njit, prange, stencil
+from numba import types
+from numba.typed import Dict
 import time
 from rgb2lab import rgb_to_lab
 from area import compute_area, compute_cumulative_area
-from seeds import compute_seeds
+from seeds import compute_seeds, unravel_index
 
 @njit(cache=True)
 def shortest_path(region_graph):
@@ -28,8 +30,7 @@ def compute_lambda_factor(seed_position, region_size, area, xi, height, width):
     return np.sqrt(xi / sub_region_area)
 
 @njit(parallel=True)
-def compute_regions_distances(K, seeds_positions, region_size, area, xi, height, width, lab_image):
-    memory_requirement = 0
+def compute_regions_distances(K, seeds_positions, region_size, area, xi, height, width, lab_image, sp_dict):
     for k in prange(K):
         lambda_factor = compute_lambda_factor(seeds_positions[:, k], region_size, area, xi, height, width)
         offset = region_size * lambda_factor
@@ -39,7 +40,6 @@ def compute_regions_distances(K, seeds_positions, region_size, area, xi, height,
         y_max = int(min(height - 1, seeds_positions[0, k] + offset))
         delta_x = (x_max - x_min) + 1
         delta_y = (y_max - y_min) + 1
-        memory_requirement += (delta_x * delta_y) ** 2.0
         region_graph = np.zeros((delta_x * delta_y, delta_x * delta_y))
         for y in range(delta_y - 1):
             for x in range(delta_x):
@@ -57,6 +57,20 @@ def compute_regions_distances(K, seeds_positions, region_size, area, xi, height,
                 region_graph[index, south_neighbor_index] = south_distance
                 region_graph[south_neighbor_index, index] = south_distance
         shortest_region_path = shortest_path(region_graph)
+        paths = np.zeros((4, shortest_region_path.shape[0] - 1))
+        seed_index = int((seeds_positions[0, k] - y_min) * delta_x + seeds_positions[1, k] - x_min)
+        counter = 0
+        for i in range(shortest_region_path.shape[0]):
+            if i != seed_index:
+                y_d, x_d = unravel_index(i, delta_x)
+                y, x = y_d + y_min, x_d + x_min
+                #paths[:, counter] = [y, x, shortest_region_path[i, seed_index], k]
+                paths[0, counter] = y
+                paths[1, counter] = x
+                paths[2, counter] = shortest_region_path[i, seed_index]
+                paths[3, counter] = k
+                counter += 1
+        sp_dict[k] = paths
     print("Fine iterazione")
 
 def main():
@@ -89,7 +103,8 @@ def main():
     for iteration in range(max_iterations):
         labels = np.ones_like(area) * -1.0
         global_distances = np.ones_like(area) * 1E12
-        compute_regions_distances(K, seeds_positions, region_size, area, xi, lab_image.shape[0], lab_image.shape[1], lab_image)
+        sp_dict = Dict.empty(key_type=types.int64, value_type=types.float64[:, :])
+        compute_regions_distances(K, seeds_positions, region_size, area, xi, lab_image.shape[0], lab_image.shape[1], lab_image, sp_dict)
         break
 
 
