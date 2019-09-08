@@ -48,13 +48,36 @@ def sp_d(seed_position, offset, lab_image):
             else:
                 heap.append((1E12, y, x))
     heapq.heapify(heap)
+    while len(heap) > 0:
+        nearest_node = heapq.heappop(heap)
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                if ((dy != 0 and dx != 0) and 
+                    (0 <= nearest_node[1] + dy < lab_image.shape[0] and 0 <= nearest_node[2] + dx < lab_image.shape[1]) and
+                    (0 <= nearest_node[1] + dy - y_min < delta_y and 0 <= nearest_node[2] + dx - x_min < delta_x)):
+                    distance = np.sqrt(
+                        1 + np.sum(np.power(lab_image[nearest_node[1], nearest_node[2], :] - lab_image[nearest_node[1] + dy, nearest_node[2] + dx, :], 2.0))
+                    )
+                    link_length = nearest_node[0] + distance
+                    flatten_index = (nearest_node[1] + dy - y_min) * delta_x + nearest_node[2] - x_min + dx
+                    if link_length < distances[flatten_index]:
+                        distances[flatten_index] = link_length
+                        for i in range(len(heap)):
+                            if heap[i][1] == nearest_node[1] + dy and heap[i][2] == nearest_node[2] + dx:
+                                heap.remove(heap[i])
+                                break
+                        heapq.heappush(heap, (link_length, nearest_node[1] + dy, nearest_node[2] + dx))
+    return distances.reshape((delta_y, delta_x))
 
 @njit(parallel=True)
 def compute_regions_distances(K, seeds_positions, region_size, area, xi, height, width, lab_image, sp_dict):
     for k in prange(K):
         lambda_factor = compute_lambda_factor(seeds_positions[:, k], region_size, area, xi, height, width)
         offset = region_size * lambda_factor
-        sp_d(seeds_positions[:, k], offset, lab_image)
+        k_distances = sp_d(seeds_positions[:, k], offset, lab_image)
+        if k == 0:
+            print(k_distances.shape)
+            print(seeds_positions[:, k])
         #x_min = int(max(0, seeds_positions[1, k] - offset))
         #x_max = int(min(width - 1, seeds_positions[1, k] + offset))
         #y_min = int(max(0, seeds_positions[0, k] - offset))
